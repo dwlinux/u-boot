@@ -18,6 +18,7 @@
  */
 
 #include <config.h>
+#include <asm/gic.h>
 #include <asm/psci.h>
 #include <asm/arch/cpu.h>
 
@@ -38,6 +39,8 @@
 
 #define	ONE_MS			(CONFIG_SYS_CLK_FREQ / 1000)
 #define	TEN_MS			(10 * ONE_MS)
+#define	GICD_BASE		0x1c81000
+#define	GICC_BASE		0x1c82000
 
 .macro	timer_wait	reg, ticks
 	@ Program CNTP_TVAL
@@ -61,7 +64,27 @@
 
 .globl	psci_arch_init
 psci_arch_init:
+	movw	r4, #(GICD_BASE & 0xffff)
+	movt	r4, #(GICD_BASE >> 16)
+
+	ldr	r5, [r4, #GICD_IGROUPRn]
+	bic	r5, r5, #(1 << 15) 	@ SGI15 as Group-0
+	str	r5, [r4, #GICD_IGROUPRn]
+
+	mov	r5, #0			@ Set SGI15 priority to 0
+	strb	r5, [r4, #(GICD_IPRIORITYRn + 15)]
+
+	add	r4, r4, #0x1000		@ GICC address
+
+	mov	r5, #0xff
+	str	r5, [r4, #GICC_PMR]	@ Be cool with non-secure
+
+	ldr	r5, [r4, #GICC_CTLR]
+	orr	r5, r5, #(1 << 3)	@ Switch FIQEn on
+	str	r5, [r4, #GICC_CTLR]
+
 	mrc	p15, 0, r5, c1, c1, 0	@ Read SCR
+	orr	r5, r5, #4		@ Enable FIQ in monitor mode
 	bic	r5, r5, #1		@ Secure mode
 	mcr	p15, 0, r5, c1, c1, 0	@ Write SCR
 	isb
@@ -79,6 +102,87 @@ psci_arch_init:
 
 	bx	lr
 
+.globl	psci_fiq_enter
+psci_fiq_enter:
+	push	{r0-r12}
+
+	@ Switch to secure
+	mrc	p15, 0, r7, c1, c1, 0
+	bic	r8, r7, #1
+	mcr	p15, 0, r8, c1, c1, 0
+	isb
+
+	movw	r8, #(GICC_BASE & 0xffff)
+	movt	r8, #(GICC_BASE >> 16)
+	ldr	r9, [r8, #GICC_IAR]
+	movw	r10, #0x3ff
+	movt	r10, #0
+	cmp	r9, r10
+	bne	out1
+	movw	r10, #0x3fe
+	cmp	r9, r10
+	bne	out1
+	str	r9, [r8, #GICC_EOIR]
+	dsb
+
+	@ Compute CPU number
+	lsr	r9, r9, #10
+	and	r9, r9, #0xf
+
+	movw	r8, #(SUNXI_CPUCFG_BASE & 0xffff)
+	movt	r8, #(SUNXI_CPUCFG_BASE >> 16)
+
+	@ Wait for the core to enter WFI
+	lsl	r11, r9, #6		@ x64
+	add	r11, r11, r8
+
+#if 0
+1:	ldr	r10, [r11, #0x48]
+	tst	r10, #(1 << 2)
+	bne	2f
+	timer_wait r10, ONE_MS
+	b	1b
+#endif
+	@ Reset CPU
+2:	mov	r10, #0
+	str	r10, [r11, #0x40]
+
+	@ Lock CPU
+	mov	r10, #1
+	lsl	r9, r10, r9		@ r9 is now CPU mask
+	ldr	r10, [r8, #0x1e4]
+	bic	r10, r10, r9
+	str	r10, [r8, #0x1e4]
+
+	@ Set power gating
+	ldr	r10, [r8, #0x1b4]
+	orr	r10, r10, #1
+	str	r10, [r8, #0x1b4]
+	timer_wait r10, ONE_MS
+
+	@ Activate power clamp
+	mov	r10, #1
+1:	str	r10, [r8, #0x1b0]
+	lsl	r10, r10, #1
+	orr	r10, r10, #1
+	tst	r10, #0x100
+	beq	1b
+
+	movw	r0, #0x8000
+	movt	r0, #0x01c2
+	mov	r1, #'%'
+	str	r1, [r0]
+
+	@ Restore security level
+out:	mcr	p15, 0, r7, c1, c1, 0
+
+	pop	{r0-r12}
+	movs	pc, lr
+out1:	movw	r0, #0x8000
+	movt	r0, #0x01c2
+	mov	r1, #'@'
+	str	r1, [r0]
+	b	out
 	@ r1 = target CPU
 	@ r2 = target PC
 .globl	psci_cpu_on
@@ -158,5 +262,39 @@ _sunxi_cpu_entry:
 	ldr	r0, [r0]
 	b	_do_nonsec_entry
 
+.globl	psci_cpu_off
+psci_cpu_off:
+	mrc	p15, 0, r0, c1, c0, 0		@ SCTLR
+	bic	r0, r0, #(1 << 2)		@ Clear C bit
+	mcr	p15, 0, r0, c1, c0, 0		@ SCTLR
+	isb
+	dsb
+
+	clrex					@ Why???
+
+	mrc	p15, 0, r0, c1, c0, 1		@ ACTLR
+	bic	r0, r0, #(1 << 6)		@ Clear SMP bit
+	mcr	p15, 0, r0, c1, c0, 1		@ ACTLR
+	isb
+	dsb
+
+	@ Ask CPU0 to pull the rug...
+	movw	r0, #(GICD_BASE & 0xffff)
+	movt	r0, #(GICD_BASE >> 16)
+	movw	r1, #15				@ SGI15
+	movt	r1, #1				@ Target is CPU0
+	str	r1, [r0, #GICD_SGIR]
+	dsb
+
+1:	wfi
+	b	1b
+
+.globl	default_psci_vector
+default_psci_vector:
+	movw	r0, #0x8000
+	movt	r0, #0x01c2
+	mov	r1, #'#'
+	str	r1, [r0]
+	b	default_psci_vector
 text_end:
 	.popsection
