@@ -249,6 +249,12 @@ static int dw_eth_init(struct eth_device *dev, bd_t *bis)
 	rx_descs_init(dev);
 	tx_descs_init(dev);
 
+	writel(FIXEDBURST | PRIORXTX_41 | BURST_8,
+			&dma_p->busmode);
+
+	writel(readl(&dma_p->opmode) | FLUSHTXFIFO | STOREFORWARD |
+		TXSECONDFRAME, &dma_p->opmode);
+
 	writel(FIXEDBURST | PRIORXTX_41 | BURST_16, &dma_p->busmode);
 
 	writel(readl(&dma_p->opmode) | FLUSHTXFIFO | STOREFORWARD,
