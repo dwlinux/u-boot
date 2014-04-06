@@ -78,6 +78,7 @@ obj-$(CONFIG_PENGPOD1000)	+= dram_sun4i_408_1024_iow16.o
 obj-$(CONFIG_POV_PROTAB2)	+= dram_pov_protab2.o
 obj-$(CONFIG_POV_PROTAB2_XXL)	+= dram_pov_protab2_xxl.o
 obj-$(CONFIG_R7DONGLE)	+= dram_r7dongle.o
+obj-$(CONFIG_RSH_A10_D_A20)	+= dram_rsh_a10-d_a20.o
 obj-$(CONFIG_SANEI_N90)	+= dram_sanei_n90.o
 obj-$(CONFIG_UHOST_U1A)	+= dram_sun4i_360_1024_iow8.o
 obj-$(CONFIG_WOBO_I5)		+= dram_wobo_i5.o
